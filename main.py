@@ -1,9 +1,9 @@
 from scene import Scene; import taichi as ti; from taichi.math import *
-day = False; manual_seed = 77
+day = True; manual_seed = 77
 scene = Scene(voxel_edges=0, exposure=2 - day)
 scene.set_floor(-0.05, (1.0, 1.0, 1.0))
-scene.set_background_color((0, 0, 1))
-scene.set_direction_light((1, 1, 1), 0.1, (0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
+scene.set_background_color((0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
+scene.set_directional_light((1, 1, 1), 0.1, (0.9, 0.98, 1) if day else (0.01, 0.01, 0.02))
 lgrid, ngrid = 15, 8
 
 @ti.func
