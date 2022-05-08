@@ -1,3 +1,4 @@
+from sys import breakpointhook
 import taichi as ti
 
 from math_utils import (eps, inf, out_dir, ray_aabb_intersection)
@@ -21,8 +22,6 @@ class Renderer:
         self.color_buffer = ti.Vector.field(3, dtype=ti.f32)
         self.bbox = ti.Vector.field(3, dtype=ti.f32, shape=2)
         self.fov = ti.field(dtype=ti.f32, shape=())
-        self.voxel_color = ti.Vector.field(3, dtype=ti.u8)
-        self.voxel_material = ti.field(dtype=ti.i8)
 
         self.light_direction = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.light_direction_noise = ti.field(dtype=ti.f32, shape=())
@@ -47,13 +46,8 @@ class Renderer:
         self.voxel_inv_dx = 1 / dx
         # Note that voxel_inv_dx == voxel_grid_res iff the box has width = 1
         self.voxel_grid_res = 128
-        voxel_grid_offset = [-self.voxel_grid_res // 2 for _ in range(3)]
 
         ti.root.dense(ti.ij, image_res).place(self.color_buffer)
-        ti.root.dense(ti.ijk,
-                      self.voxel_grid_res).place(self.voxel_color,
-                                                 self.voxel_material,
-                                                 offset=voxel_grid_offset)
 
         self._rendered_image = ti.Vector.field(3, float, image_res)
         self.set_up(*up)
@@ -71,21 +65,6 @@ class Renderer:
                                       direction[2] / direction_norm)
         self.light_direction_noise[None] = light_direction_noise
         self.light_color[None] = light_color
-
-    @ti.func
-    def inside_grid(self, ipos):
-        return ipos.min() >= -self.voxel_grid_res // 2 and ipos.max(
-        ) < self.voxel_grid_res // 2
-
-    @ti.func
-    def query_density(self, ipos):
-        inside = self.inside_grid(ipos)
-        ret = 0.0
-        if inside:
-            ret = self.voxel_material[ipos]
-        else:
-            ret = 0.0
-        return ret
 
     @ti.func
     def _to_voxel_index(self, pos):
@@ -112,8 +91,8 @@ class Renderer:
         voxel_color = ti.Vector([0.0, 0.0, 0.0])
         is_light = 0
         if self.inside_particle_grid(voxel_index):
-            voxel_color = self.voxel_color[voxel_index] * (1.0 / 255)
-            if self.voxel_material[voxel_index] == 2:
+            material, voxel_color = self.get_voxel(voxel_index)
+            if material == 2:
                 is_light = 1
 
         return voxel_color * (1.3 - 1.2 * f), is_light
@@ -134,7 +113,7 @@ class Renderer:
         return self.floor_color[None]
 
     @ti.func
-    def dda_voxel(self, eye_pos, d):
+    def dda_voxel(self, eye_pos, d, steps):
         for i in ti.static(range(3)):
             if abs(d[i]) < 1e-6:
                 d[i] = 1e-6
@@ -156,7 +135,7 @@ class Renderer:
         c = ti.Vector([0.0, 0.0, 0.0])
         voxel_index = ti.Vector([0, 0, 0])
         if inter:
-            near = max(0, near)
+            near = max(self.voxel_dx, near)
 
             pos = eye_pos + d * (near + 5 * eps)
 
@@ -167,17 +146,19 @@ class Renderer:
             i = 0
             hit_pos = ti.Vector([0.0, 0.0, 0.0])
             while running:
-                last_sample = int(self.query_density(ipos))
-                if not self.inside_particle_grid(ipos):
+                if not self.inside_particle_grid(ipos) or i >= steps:
                     running = 0
-
-                if last_sample:
+                    break
+                mat, color = self.get_voxel(ipos)
+                if mat > 0:
                     mini = (ipos - o + ti.Vector([0.5, 0.5, 0.5]) -
                             rsign * 0.5) * rinv
                     hit_distance = mini.max() * self.voxel_dx + near
                     hit_pos = eye_pos + (hit_distance + 1e-3) * d
                     voxel_index = self._to_voxel_index(hit_pos)
-                    c, hit_light = self.voxel_surface_color(hit_pos)
+                    c = color
+                    hit_light = mat == 2
+                    #c, hit_light = self.voxel_surface_color(hit_pos)
                     running = 0
                 else:
                     mm = ti.Vector([0, 0, 0])
@@ -201,12 +182,15 @@ class Renderer:
                 1] and self.bbox[0][2] <= pos[2] and pos[2] < self.bbox[1][2]
 
     @ti.func
-    def next_hit(self, pos, d, t):
+    def next_hit(self, pos, d, t, bounce):
         closest = inf
         normal = ti.Vector([0.0, 0.0, 0.0])
         c = ti.Vector([0.0, 0.0, 0.0])
         hit_light = 0
-        closest, normal, c, hit_light, vx_idx = self.dda_voxel(pos, d)
+        steps = 2048
+        if bounce > 0:
+            steps = 128
+        closest, normal, c, hit_light, vx_idx = self.dda_voxel(pos, d, steps)
 
         ray_march_dist = self.ray_march(pos, d)
         if ray_march_dist < DIS_LIMIT and ray_march_dist < closest:
@@ -271,7 +255,7 @@ class Renderer:
             # Tracing begin
             for bounce in range(MAX_RAY_DEPTH):
                 depth += 1
-                closest, normal, c, hit_light = self.next_hit(pos, d, t)
+                closest, normal, c, hit_light = self.next_hit(pos, d, t, bounce)
                 hit_pos = pos + closest * d
                 if not hit_light and normal.norm() != 0 and closest < 1e8:
                     d = out_dir(normal)
@@ -290,7 +274,7 @@ class Renderer:
                         if dot > 0:
                             hit_light_ = 0
                             dist, _, _, hit_light_ = self.next_hit(
-                                pos, light_dir, t)
+                                pos, light_dir, t, bounce)
                             if dist > DIS_LIMIT:
                                 # far enough to hit directional light
                                 contrib += throughput * \
@@ -334,13 +318,10 @@ class Renderer:
     @ti.kernel
     def recompute_bbox(self):
         for d in ti.static(range(3)):
-            self.bbox[0][d] = 1e9
-            self.bbox[1][d] = -1e9
-        for I in ti.grouped(self.voxel_material):
-            if self.voxel_material[I] != 0:
-                for d in ti.static(range(3)):
-                    ti.atomic_min(self.bbox[0][d], (I[d] - 1) * self.voxel_dx)
-                    ti.atomic_max(self.bbox[1][d], (I[d] + 2) * self.voxel_dx)
+            self.bbox[0][d] = -128
+            self.bbox[1][d] = 128
+        self.bbox[0][1] = -self.voxel_dx
+        self.bbox[1][1] = 2
 
     def reset_framebuffer(self):
         self.current_spp = 0
@@ -371,12 +352,5 @@ class Renderer:
         return r
 
     @ti.func
-    def set_voxel(self, idx, mat, color):
-        self.voxel_material[idx] = mat
-        self.voxel_color[idx] = self.to_vec3u(color)
-
-    @ti.func
     def get_voxel(self, ijk):
-        mat = self.voxel_material[ijk]
-        color = self.voxel_color[ijk]
-        return mat, self.to_vec3(color)
+        raise NotImplementedError

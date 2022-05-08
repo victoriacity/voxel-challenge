@@ -6,7 +6,7 @@ from renderer import Renderer
 from math_utils import np_normalize, np_rotate_matrix
 
 VOXEL_DX = 1 / 64
-SCREEN_RES = (1280, 720)
+SCREEN_RES = (2560, 1440)
 TARGET_FPS = 30
 UP_DIR = (0, 1, 0)
 HELP_MSG = '''
@@ -23,8 +23,8 @@ MAT_LIGHT = 2
 class Camera:
     def __init__(self, window, up):
         self._window = window
-        self._camera_pos = np.array((0.4, 0.5, 2.0))
-        self._lookat_pos = np.array((0.0, 0.0, 0.0))
+        self._camera_pos = np.array((1.8847815,0.7960471,-0.87318593))*4#np.array((0.4, 0.5, 2.0))
+        self._lookat_pos = np.array((1.3012588,0.53783697,-2.87389))*4#np.array((0.0, 0.0, 0.0))
         self._up = np_normalize(np.array(up))
         self._last_mouse_pos = None
 
@@ -108,14 +108,14 @@ class Camera:
 
 
 class Scene:
-    def __init__(self, voxel_edges=0.06, exposure=3):
-        ti.init(arch=ti.vulkan)
+    def __init__(self, renderer, voxel_edges=0.06, exposure=3):
+        ti.init(arch=ti.cuda)
         print(HELP_MSG)
         self.window = ti.ui.Window("Taichi Voxel Renderer",
                                    SCREEN_RES,
                                    vsync=True)
         self.camera = Camera(self.window, up=UP_DIR)
-        self.renderer = Renderer(dx=VOXEL_DX,
+        self.renderer = renderer(dx=VOXEL_DX,
                                  image_res=SCREEN_RES,
                                  up=UP_DIR,
                                  voxel_edges=voxel_edges,
@@ -131,15 +131,6 @@ class Scene:
             [ti.round(idx[0]),
              ti.round(idx[1]),
              ti.round(idx[2])]).cast(ti.i32)
-
-    @ti.func
-    def set_voxel(self, idx, mat, color):
-        self.renderer.set_voxel(self.round_idx(idx), mat, color)
-
-    @ti.func
-    def get_voxel(self, idx):
-        mat, color = self.renderer.get_voxel(self.round_idx(idx))
-        return mat, color
 
     def set_floor(self, height, color):
         self.renderer.floor_height[None] = height
@@ -175,6 +166,9 @@ class Scene:
                 timestamp = datetime.today().strftime('%Y-%m-%d-%H%M%S')
                 fname = f"screenshot{timestamp}.jpg"
                 ti.tools.image.imwrite(img, fname)
+            if self.window.is_pressed('c'):
+                print(self.renderer.camera_pos)
+                print(self.renderer.look_at)
             canvas.set_image(img)
             elapsed_time = time.time() - t
             if elapsed_time * TARGET_FPS > 1:
